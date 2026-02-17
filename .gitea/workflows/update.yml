@@ -1,0 +1,127 @@
+name: Auto Update LibreWolf Template
+
+on:
+  schedule:
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+
+jobs:
+  update-template:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: sudo apt-get update && sudo apt-get install -y curl jq
+
+      - name: Fetch Latest LibreWolf Binary Release
+        id: get_release
+        run: |
+          RELEASES=$(curl -fsSL "https://codeberg.org/api/v1/repos/librewolf/bsys6/releases?limit=50")
+          TAG=$(echo "$RELEASES" | jq -r '[.[] | select(.draft == false and .prerelease == false)] | sort_by(.published_at) | reverse | .[0].tag_name')
+
+          if [[ -z "$TAG" || "$TAG" == "null" ]]; then
+            echo "No binary release found"
+            exit 0
+          fi
+
+          VERSION="${TAG%-*}"
+          REV="${TAG##*-}"
+
+          X86_SHA_URL=$(echo "$RELEASES" | jq -r --arg tag "$TAG" '
+            [.[] | select(.tag_name == $tag)][0].assets[]
+            | select(.name | endswith("linux-x86_64-package.tar.xz.sha256sum"))
+            | .browser_download_url
+          ')
+
+          AARCH64_SHA_URL=$(echo "$RELEASES" | jq -r --arg tag "$TAG" '
+            [.[] | select(.tag_name == $tag)][0].assets[]
+            | select(.name | endswith("linux-arm64-package.tar.xz.sha256sum"))
+            | .browser_download_url
+          ')
+
+          if [[ -z "$X86_SHA_URL" || "$X86_SHA_URL" == "null" || -z "$AARCH64_SHA_URL" || "$AARCH64_SHA_URL" == "null" ]]; then
+            echo "Missing required checksum assets"
+            exit 1
+          fi
+
+          X86_SHA256=$(curl -fsSL "$X86_SHA_URL" | awk '{print $1}')
+          AARCH64_SHA256=$(curl -fsSL "$AARCH64_SHA_URL" | awk '{print $1}')
+
+          if [[ -z "$X86_SHA256" || -z "$AARCH64_SHA256" ]]; then
+            echo "Failed to fetch one or more checksums"
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "x86_sha256=$X86_SHA256" >> "$GITHUB_OUTPUT"
+          echo "aarch64_sha256=$AARCH64_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Read Current Template Values
+        if: steps.get_release.outputs.version
+        id: current
+        run: |
+          CURRENT_VERSION=$(grep '^version=' template | cut -d= -f2)
+          CURRENT_REV=$(grep '^_rev=' template | cut -d= -f2)
+          CURRENT_X86_SHA256=$(awk '
+            /^[[:space:]]*x86_64\)/ { in_x86=1; in_aarch64=0; next }
+            /^[[:space:]]*aarch64\)/ { in_x86=0; in_aarch64=1; next }
+            in_x86 && /_checksum=/ { sub(/.*=/, ""); print; exit }
+          ' template)
+          CURRENT_AARCH64_SHA256=$(awk '
+            /^[[:space:]]*aarch64\)/ { in_aarch64=1; in_x86=0; next }
+            /^[[:space:]]*\*\)/ { in_aarch64=0; in_x86=0; next }
+            in_aarch64 && /_checksum=/ { sub(/.*=/, ""); print; exit }
+          ' template)
+
+          echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "rev=$CURRENT_REV" >> "$GITHUB_OUTPUT"
+          echo "x86_sha256=$CURRENT_X86_SHA256" >> "$GITHUB_OUTPUT"
+          echo "aarch64_sha256=$CURRENT_AARCH64_SHA256" >> "$GITHUB_OUTPUT"
+
+      - name: Update Template
+        if: steps.get_release.outputs.version && (steps.get_release.outputs.version != steps.current.outputs.version || steps.get_release.outputs.rev != steps.current.outputs.rev || steps.get_release.outputs.x86_sha256 != steps.current.outputs.x86_sha256 || steps.get_release.outputs.aarch64_sha256 != steps.current.outputs.aarch64_sha256)
+        run: |
+          sed -i \
+            -e "s/^version=.*/version=${{ steps.get_release.outputs.version }}/" \
+            -e "s/^_rev=.*/_rev=${{ steps.get_release.outputs.rev }}/" \
+            -e "s/^revision=.*/revision=1/" \
+            template
+
+          awk \
+            -v x86_checksum="${{ steps.get_release.outputs.x86_sha256 }}" \
+            -v aarch64_checksum="${{ steps.get_release.outputs.aarch64_sha256 }}" '
+            /^[[:space:]]*x86_64\)/ { in_x86=1; in_aarch64=0 }
+            /^[[:space:]]*aarch64\)/ { in_x86=0; in_aarch64=1 }
+            /^[[:space:]]*\*\)/ { in_x86=0; in_aarch64=0 }
+            in_x86 && /_checksum=/ { sub(/_checksum=.*/, "_checksum=" x86_checksum) }
+            in_aarch64 && /_checksum=/ { sub(/_checksum=.*/, "_checksum=" aarch64_checksum) }
+            { print }
+          ' template > template.tmp && mv template.tmp template
+
+      - name: Commit and Push
+        if: steps.get_release.outputs.version && (steps.get_release.outputs.version != steps.current.outputs.version || steps.get_release.outputs.rev != steps.current.outputs.rev || steps.get_release.outputs.x86_sha256 != steps.current.outputs.x86_sha256 || steps.get_release.outputs.aarch64_sha256 != steps.current.outputs.aarch64_sha256)
+        run: |
+          git config user.name "librewolf-bot"
+          git config user.email "actions@localhost"
+          git add template
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "template: update to ${{ steps.get_release.outputs.tag }} [auto]"
+
+          BRANCH="${GITHUB_REF_NAME:-${GITEA_REF_NAME:-}}"
+          if [[ -n "$BRANCH" ]]; then
+            git pull --rebase origin "$BRANCH"
+            git push origin "HEAD:${BRANCH}"
+          else
+            git pull --rebase
+            git push
+          fi
