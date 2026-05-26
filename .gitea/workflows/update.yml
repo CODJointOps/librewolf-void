@@ -86,10 +86,20 @@ jobs:
       - name: Update Template
         if: steps.get_release.outputs.version && (steps.get_release.outputs.version != steps.current.outputs.version || steps.get_release.outputs.rev != steps.current.outputs.rev || steps.get_release.outputs.x86_sha256 != steps.current.outputs.x86_sha256 || steps.get_release.outputs.aarch64_sha256 != steps.current.outputs.aarch64_sha256)
         run: |
+          NEW_VERSION="${{ steps.get_release.outputs.version }}"
+          OLD_VERSION="${{ steps.current.outputs.version }}"
+          CUR_REVISION=$(grep '^revision=' template | cut -d= -f2)
+
+          if [ "$NEW_VERSION" = "$OLD_VERSION" ]; then
+              NEW_REVISION=$((CUR_REVISION + 1))
+          else
+              NEW_REVISION=1
+          fi
+
           sed -i \
-            -e "s/^version=.*/version=${{ steps.get_release.outputs.version }}/" \
+            -e "s/^version=.*/version=${NEW_VERSION}/" \
             -e "s/^_rev=.*/_rev=${{ steps.get_release.outputs.rev }}/" \
-            -e "s/^revision=.*/revision=1/" \
+            -e "s/^revision=.*/revision=${NEW_REVISION}/" \
             template
 
           awk \
