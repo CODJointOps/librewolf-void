@@ -20,7 +20,7 @@ jobs:
         id: get_release
         run: |
           RELEASES=$(curl -fsSL "https://codeberg.org/api/v1/repos/librewolf/bsys6/releases?limit=50")
-          TAG=$(echo "$RELEASES" | jq -r '[.[] | select(.draft == false and .prerelease == false)] | sort_by(.published_at) | reverse | .[0].tag_name')
+          TAG=$(echo "$RELEASES" | jq -r '[.[] | select(.draft == false and .prerelease == false)] | sort_by((.tag_name | sub("^[^0-9]*";"") | split("-") | .[0] | [scan("[0-9]+")] | map(tonumber)), (.tag_name | sub("^[^0-9]*";"") | split("-") | .[1:] | join(".") | [scan("[0-9]+")] | map(tonumber)), .published_at) | last | .tag_name')
 
           if [[ -z "$TAG" || "$TAG" == "null" ]]; then
             echo "No binary release found"
