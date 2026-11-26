@@ -24,7 +24,7 @@ jobs:
 
           if [[ -z "$TAG" || "$TAG" == "null" ]]; then
             echo "No binary release found"
-            exit 0
+            exit 1
           fi
 
           VERSION="${TAG%-*}"
